@@ -1,5 +1,4 @@
-#!/usr/bin/env python
-
+#!/usr/bin/python3
 import argparse
 import json
 import os
@@ -8,6 +7,18 @@ import requests
 import shutil
 import sys
 from typing import Dict, Optional, List
+
+CERTS = ("/etc/cb/certs/carbonblack-alliance-client.crt",
+         "/etc/cb/certs/carbonblack-alliance-client.key")
+
+EXPORT_FEEDS = ['abusech', 'Bit9AdvancedThreats', 'alienvault',
+                'CbCommunity', 'Bit9EarlyAccess', 'Bit9SuspiciousIndicators', 'Bit9EndpointVisibility',
+                'fbthreatexchange', 'CbKnownIOCs', 'sans', 'mdl', 'ThreatConnect', 'tor', 'attackframework']
+
+PROXY = {
+        "http": os.getenv('ENV_HTTP_PROXY'),
+        "https": os.getenv('ENV_HTTPS_PROXY'),
+        }
 
 # noinspection PyBroadException
 try:
@@ -121,13 +132,6 @@ def main(argv: List) -> int:
         except shutil.SameFileError:
             pass
 
-        cert = ("/etc/cb/certs/carbonblack-alliance-client.crt",
-                "/etc/cb/certs/carbonblack-alliance-client.key")
-
-        export_feeds = ['abusech', 'Bit9AdvancedThreats', 'alienvault',
-                        'CbCommunity', 'Bit9EarlyAccess', 'Bit9SuspiciousIndicators', 'Bit9EndpointVisibility',
-                        'fbthreatexchange', 'CbKnownIOCs', 'sans', 'mdl', 'ThreatConnect', 'tor', 'attackframework']
-
         feeds = requests.get(url, headers=header, verify=False)
         feeds.raise_for_status()
 
@@ -135,9 +139,9 @@ def main(argv: List) -> int:
             feed_url = feed.get('feed_url', None)
             feed_name = str(feed.get('name', ""))
             print(f"Checking feed {feed_name} at {feed_url}")
-            if feed_url and 'http' in feed_url and feed_name in export_feeds:
+            if feed_url and 'http' in feed_url and feed_name in EXPORT_FEEDS:
                 try:
-                    response = requests.get(url=feed_url, cert=cert)
+                    response = requests.get(url=feed_url, cert=CERTS, proxies=PROXY)
                     response.raise_for_status()
                     fn = os.path.join(export_path, feed_name + ".json")
                     f = open(fn, "w+")

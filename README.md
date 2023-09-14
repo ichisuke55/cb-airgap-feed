@@ -2,7 +2,21 @@
 
 ## NOTE
 
-This project will no longer be maintained. Starting with EDR version 7.5.0, the cb-airgap-feed script will be incorporated into the EDR distribution. It will work the same way, using the same command-line options, and will be called `/usr/share/cb/cbfeed_airgap`.
+Upstream project is no longer maintenanced. But under proxy environment, airgap_feed script doesn't work properly.  
+This repository is fixed for using the situation.
+
+## Getting Started
+1. `pip install -r requirements.txt`
+2. set proxy environment variables
+*Do not overlap with the HTTP_PROXY variable
+```
+export ENV_HTTP_PROXY=http://proxy-ip:proxy-port
+export ENV_HTTPS_PROXY=http://proxy-ip:proxy-port
+```
+3. execute script like following.
+```
+./airgap_feed.py export -f /tmp/feed
+```
 
 ## Description
 
