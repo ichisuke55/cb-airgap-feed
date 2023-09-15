@@ -10,8 +10,8 @@ This repository is fixed for using the situation.
 2. set proxy environment variables
 *Do not overlap with the HTTP_PROXY variable
 ```
-export ENV_HTTP_PROXY=http://proxy-ip:proxy-port
-export ENV_HTTPS_PROXY=http://proxy-ip:proxy-port
+export HTTP_PROXY=http://proxy-ip:proxy-port
+export HTTPS_PROXY=http://proxy-ip:proxy-port
 ```
 3. execute script like following.
 ```

@@ -7,6 +7,10 @@ import requests
 import shutil
 import sys
 from typing import Dict, Optional, List
+from logging import getLogger, basicConfig, DEBUG
+
+basicConfig(level=DEBUG)
+logger = getLogger(__name__)
 
 CERTS = ("/etc/cb/certs/carbonblack-alliance-client.crt",
          "/etc/cb/certs/carbonblack-alliance-client.key")
@@ -15,9 +19,13 @@ EXPORT_FEEDS = ['abusech', 'Bit9AdvancedThreats', 'alienvault',
                 'CbCommunity', 'Bit9EarlyAccess', 'Bit9SuspiciousIndicators', 'Bit9EndpointVisibility',
                 'fbthreatexchange', 'CbKnownIOCs', 'sans', 'mdl', 'ThreatConnect', 'tor', 'attackframework']
 
-PROXY = {
-        "http": os.getenv('ENV_HTTP_PROXY'),
-        "https": os.getenv('ENV_HTTPS_PROXY'),
+DEFAULT_SERVER = "127.0.0.1"
+DEFAULT_PORT = 443
+FEED_API_URL_FMT = "https://{edr_server}:{edr_port}/api/v1/feed"
+
+NO_PROXY = {
+        "http": None,
+        "https": None,
         }
 
 # noinspection PyBroadException
@@ -38,25 +46,117 @@ def get_api_token() -> str:
     return token
 
 
-def get_feed(headers: Dict, name: str) -> Optional[Dict]:
-    # if the port is something other than 443 change below
-    url = "https://127.0.0.1:443/api/v1/feed"
-    feeds = requests.get(url, headers=headers, verify=False)
+def get_feed(headers: Dict, name: str, server: str = DEFAULT_SERVER,
+             port: int = DEFAULT_PORT) -> Optional[Dict]:
+    feeds = requests.get(FEED_API_URL_FMT.format(edr_server=server, edr_port=port), headers=headers,
+                                verify=False, proxies=NO_PROXY)
     feeds.raise_for_status()
     for feed in feeds.json():
         if feed['name'].lower() == name.lower():
             return feed
-    return None 
+    return None
 
 
-def build_cli_parser(description: str = "VMware Carbon Black EDR Airgap Feeds import/export utility") \
-        -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description=description)
-    return parser
+def import_feeds(folder: str, headers: Dict, server: str = DEFAULT_SERVER,
+                 port: int = DEFAULT_PORT) -> int:
+    logger.info(f'Importing Threat Intelligence feeds from {folder}')
+
+    errors = 0
+
+    for root, sub_dirs, files in os.walk(folder):
+        for temp_file in files:
+            if temp_file.endswith('.json'):
+                filepath = os.path.join(root, temp_file)
+                logger.debug(f'filepath = {filepath}')
+
+                feed_url = f"file://{filepath}"
+                data = {'feed_url': feed_url,
+                        'validate_server_cert': False,
+                        'manually_added': True}
+
+                file_json = json.loads(open(filepath).read())
+                feed_name = file_json['feedinfo']['name']
+                feed = get_feed(headers, feed_name, port=port)
+                if feed is not None:
+                    feed_id = feed.pop('id')
+                    # CB-39336: cbfeed_airgap import of existing feeds fails when ValidateApiPayloadSchema enabled
+                    feed = {k: v for k, v in feed.items() if v is not None}
+                    logger.info(f"Feed {feed_name} already exists, attempting update")
+                    feed.update({"feed_url": feed_url, "manually_added": True})
+                    feed_update = requests.put(
+                        f"{FEED_API_URL_FMT.format(edr_server=server, edr_port=port)}/{feed_id}",
+                        data=json.dumps(feed), headers=headers, verify=False, proxies=NO_PROXY)
+                    if feed_update.status_code == 200:
+                        logger.info(f"Updated {feed_name}")
+                    else:
+                        logger.error(f"Failed to update {feed_name} (error {feed_update.status_code})")
+                        errors += 1
+                else:
+                    feed_update = requests.post(FEED_API_URL_FMT.format(edr_server=server, edr_port=port),
+                                                data=json.dumps(data),
+                                                headers=headers, verify=False, proxies=NO_PROXY)
+                    if feed_update.status_code == 200:
+                        logger.info(f"Added feed {feed_name}")
+                    else:
+                        logger.error(f"Failed to add feed {feed_name}: {feed_update.status_code}")
+                        errors += 1
+    return errors
 
 
-def main(argv: List) -> int:
-    parser = build_cli_parser()
+def export_feeds(folder: str, headers: Dict, server: str = DEFAULT_SERVER,
+                 port: int = DEFAULT_PORT) -> int:
+    export_path = os.path.join(folder, "feeds")
+    logger.info(f'Exporting Threat Intelligence Feeds to {export_path}')
+
+    try:
+        os.makedirs(export_path)
+    except OSError:
+        pass  # probably due to folder already existing
+
+    feeds = requests.get(FEED_API_URL_FMT.format(edr_server=server, edr_port=port),
+                         headers=headers, verify=False, proxies=NO_PROXY)
+    feeds.raise_for_status()
+
+    errors = 0
+
+    for feed in feeds.json():
+        feed_url = feed.get('feed_url', None)
+        feed_name = str(feed.get('name', ""))
+        logger.info(f"Checking feed {feed_name} at {feed_url}")
+        if feed_url and feed_url.startswith('http'):
+            if feed_name not in EXPORT_FEEDS:
+                logger.info(f"{feed_name} is not an exportable feed")
+                continue
+            try:
+                response = requests.get(url=feed_url, cert=CERTS)
+                response.raise_for_status()
+
+                fn = os.path.join(export_path, feed_name + ".json")
+                f = open(fn, "w+")
+                try:
+                    logger.info(f"Exporting feed {feed_name} to {fn}")
+                    f.write(json.dumps(response.json()))
+                except Exception as e:
+                    logger.error(f'Error writing to {feed_name}: {e}')
+                    errors += 1
+            except Exception as e:
+                logger.error(f'Could not export feed {feed_name}: {e}')
+                errors += 1
+        else:
+            logger.info(f"Invalid feed URL: {feed_url}")
+
+    return errors
+
+
+def build_cli_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="VMware Carbon Black EDR Airgap Feeds import/export utility")
+
+    parser.add_argument("-s", "--server", action="store", dest="edr_server", default=DEFAULT_SERVER,
+                        help=f"EDR server (default: {DEFAULT_SERVER})")
+
+    parser.add_argument("-p", "--port", action="store", dest="edr_port", default=DEFAULT_PORT,
+                        help=f"EDR port (default: {DEFAULT_PORT})")
+
     commands = parser.add_subparsers(help="Commands", dest="command")
 
     default_folder = os.path.join(os.path.dirname(os.path.abspath(__file__)), "feeds")
@@ -67,8 +167,12 @@ def main(argv: List) -> int:
     export_command = commands.add_parser("export", help="Export feeds to disk")
     export_command.add_argument("-f", "--folder", help="Folder to export to", default=None, required=True)
 
-    args = parser.parse_args(args=argv)
+    return parser
 
+
+def main(argv: List) -> int:
+    parser = build_cli_parser()
+    args = parser.parse_args(args=argv)
     mode = args.command
 
     if hasattr(args, "folder"):
@@ -77,83 +181,17 @@ def main(argv: List) -> int:
         # use location of script
         folder = os.path.dirname(os.path.abspath(__file__))
 
-    header = {'X-Auth-Token': get_api_token()}
-
-    # if the port is something other than 443 change below
-    url = "https://127.0.0.1:443/api/v1/feed"
+    try:
+        headers = {'X-Auth-Token': get_api_token()}
+    except psycopg2.OperationalError as e:
+        print(e)
+        return 1
 
     errors = 0
     if mode == 'import':
-        print(f'Importing Threat Intelligence feeds from {folder}')
-
-        for root, sub_dirs, files in os.walk(folder):
-            for temp_file in files:
-                if temp_file.endswith('.json'):
-                    filepath = os.path.join(root, temp_file)
-                    print(f'filepath = {filepath}')
-
-                    feed_url = f"file://{filepath}"
-                    data = {'feed_url': feed_url,
-                            'validate_server_cert': False,
-                            'manually_added': True}
-
-                    file_json = json.loads(open(filepath).read())
-                    feed_name = file_json['feedinfo']['name']
-                    feed = get_feed(header, feed_name)
-                    if feed is not None:
-                        feed_id = feed['id']
-                        print(f"Feed {feed_name} already exists, attempting update")
-                        feed.update({"feed_url": feed_url, "manually_added": True})
-                        feed_update = requests.put(f"{url}/{feed_id}", data=json.dumps(feed), headers=header,
-                                                   verify=False)
-                        if feed_update.status_code == 200:
-                            print(f"Updated {feed_name}")
-                        else:
-                            print(f"Failed to update {feed_name} (error {feed_update.status_code})")
-                            errors += 1
-                    else:
-                        feed_update = requests.post(url, data=json.dumps(data), headers=header, verify=False)
-                        if feed_update.status_code == 200:
-                            print(f"Added feed {feed_name}")
-                        else:
-                            print(f"Failed to add feed {feed_name} (error {feed_update.status_code})")
-                            errors += 1
+        errors = import_feeds(args.folder, headers, server=args.edr_server, port=args.edr_port)
     else:
-        export_path = os.path.join(folder, "feeds")
-        print(f'Exporting Threat Intelligence Feeds to {export_path}')
-
-        try:
-            os.makedirs(export_path)
-        except OSError:
-            pass  # probably due to folder already existing
-
-        try:
-            shutil.copy(os.path.abspath(__file__), folder)
-        except shutil.SameFileError:
-            pass
-
-        feeds = requests.get(url, headers=header, verify=False)
-        feeds.raise_for_status()
-
-        for feed in feeds.json():
-            feed_url = feed.get('feed_url', None)
-            feed_name = str(feed.get('name', ""))
-            print(f"Checking feed {feed_name} at {feed_url}")
-            if feed_url and 'http' in feed_url and feed_name in EXPORT_FEEDS:
-                try:
-                    response = requests.get(url=feed_url, cert=CERTS, proxies=PROXY)
-                    response.raise_for_status()
-                    fn = os.path.join(export_path, feed_name + ".json")
-                    f = open(fn, "w+")
-                    try:
-                        print(f"Exporting feed {feed_name} to {fn}")
-                        f.write(json.dumps(response.json()))
-                    except Exception as e:
-                        print(f'Error writing to {feed_name}: {e}')
-                        errors += 1
-                except Exception as e:
-                    print(f'Could not export feed {feed_name}: {e}')
-                    errors += 1
+        errors = export_feeds(args.folder, headers, server=args.edr_server, port=args.edr_port)
 
     return 0 if not errors else 1
 
