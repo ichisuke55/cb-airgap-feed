@@ -3,7 +3,13 @@
 ## NOTE
 
 Upstream project is no longer maintenanced. But under proxy environment, airgap_feed script doesn't work properly.  
-This repository is fixed for using the situation.
+This repository is fixed for using the situation.  
+After that, I found W/A for working properly under proxy environment.  
+```
+export HTTP_PROXY=
+export HTTPS_PROXY=
+export NO_PROXY=localhost,127.0.0.1,{EDR FQDN}
+```
 
 ## Getting Started
 1. `pip install -r requirements.txt`
